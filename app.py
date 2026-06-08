@@ -8,7 +8,7 @@ import os
 from dotenv import load_dotenv
 from typing import Optional, Dict
 from pydantic import BaseModel
-import psycopg2
+# psycopg2 removed
 import traceback
 from contextlib import asynccontextmanager
 
@@ -40,211 +40,14 @@ if missing_vars:
     print("=" * 60)
     raise RuntimeError(error_msg)
 
-# Database connection details
-PROJECT_ID = SUPABASE_URL.split('//')[1].split('.')[0]
-DB_HOST = f"db.{PROJECT_ID}.supabase.co"
-DB_NAME = "postgres"
-DB_USER = "postgres"
-DB_PORT = "5432"
-
 def init_db():
-    """Initialize database tables using psycopg2"""
-    try:
-        conn = psycopg2.connect(
-            host=DB_HOST,
-            database=DB_NAME,
-            user=DB_USER,
-            password=SUPABASE_DB_PASSWORD,
-            port=DB_PORT
-        )
-        cur = conn.cursor()
-        
-        # Create users table
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                id UUID PRIMARY KEY,
-                nid TEXT UNIQUE NOT NULL,
-                full_name TEXT,
-                username TEXT UNIQUE NOT NULL,
-                mobile_number TEXT,
-                activation_code TEXT,
-                bp_hash TEXT,
-                k1 TEXT,
-                k2_stretched TEXT,
-                last_t BIGINT DEFAULT 0,
-                balance FLOAT DEFAULT 0.0,
-                face_registered BOOLEAN DEFAULT FALSE,
-                biometric_registered BOOLEAN DEFAULT FALSE,
-                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-            );
-        """)
-
-        # Create profiles table
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS profiles (
-                id UUID PRIMARY KEY,
-                user_nid TEXT UNIQUE REFERENCES users(nid) ON DELETE CASCADE,
-                profile_picture_url TEXT,
-                favorites JSONB DEFAULT '[]'::jsonb,
-                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-            );
-        """)
-
-        # Migration: Check if timestamp_t exists and rename to last_t on users table
-        cur.execute("""
-            DO $$ 
-            BEGIN 
-                IF EXISTS (SELECT 1 FROM information_schema.columns 
-                           WHERE table_name='users' AND column_name='timestamp_t') THEN
-                    ALTER TABLE users RENAME COLUMN timestamp_t TO last_t;
-                END IF;
-            END $$;
-        """)
-
-        # Register Atomic Stored Procedure
-        cur.execute("""
-            CREATE OR REPLACE FUNCTION process_transfer_secure(
-                p_sender_username TEXT,
-                p_receiver_username TEXT,
-                p_amount DOUBLE PRECISION,
-                p_timestamp BIGINT,
-                p_reference TEXT
-            ) RETURNS JSON AS $$
-            DECLARE
-                v_sender_profile RECORD;
-                v_receiver_profile RECORD;
-                v_sender_account RECORD;
-                v_receiver_account RECORD;
-            BEGIN
-                -- 1. Fetch profiles (from users table) with locking
-                SELECT * INTO v_sender_profile FROM users WHERE username = p_sender_username FOR UPDATE;
-                IF NOT FOUND THEN
-                    RETURN json_build_object('status', 'error', 'message', 'Sender profile not found');
-                END IF;
-
-                SELECT * INTO v_receiver_profile FROM users WHERE username = p_receiver_username FOR UPDATE;
-                IF NOT FOUND THEN
-                    RETURN json_build_object('status', 'error', 'message', 'Receiver profile not found');
-                END IF;
-
-                -- 2. Fetch accounts with locking
-                SELECT * INTO v_sender_account FROM accounts WHERE profile_id = v_sender_profile.id AND is_active = TRUE FOR UPDATE;
-                IF NOT FOUND THEN
-                    RETURN json_build_object('status', 'error', 'message', 'Sender account not found');
-                END IF;
-
-                SELECT * INTO v_receiver_account FROM accounts WHERE profile_id = v_receiver_profile.id AND is_active = TRUE FOR UPDATE;
-                IF NOT FOUND THEN
-                    RETURN json_build_object('status', 'error', 'message', 'Receiver account not found');
-                END IF;
-
-                -- 3. Balance verification
-                IF v_sender_account.balance < p_amount THEN
-                    INSERT INTO transactions (sender_account_id, receiver_account_id, amount, status, failure_reason, reference)
-                    VALUES (v_sender_account.id, v_receiver_account.id, p_amount, 'aborted', 'Insufficient balance', p_reference);
-                    RETURN json_build_object('status', 'futile', 'message', 'Insufficient balance');
-                END IF;
-
-                -- 4. Daily Limit validation (Bypassed since daily limit columns are not in approved schema)
-
-                -- 5. Replay protection (DB level check)
-                IF p_timestamp <= v_sender_profile.last_t THEN
-                    INSERT INTO transactions (sender_account_id, receiver_account_id, amount, status, failure_reason, reference)
-                    VALUES (v_sender_account.id, v_receiver_account.id, p_amount, 'aborted', 'Replay attack detected (T <= Last_T)', p_reference);
-                    RETURN json_build_object('status', 'error', 'message', 'Replay attack detected');
-                END IF;
-
-                -- 6. Apply balances
-                UPDATE accounts SET balance = balance - p_amount WHERE id = v_sender_account.id;
-                UPDATE accounts SET balance = balance + p_amount WHERE id = v_receiver_account.id;
-
-                -- 7. Update user last_t
-                UPDATE users SET 
-                    last_t = p_timestamp
-                WHERE id = v_sender_profile.id;
-
-                -- 8. Insert success log
-                INSERT INTO transactions (sender_account_id, receiver_account_id, amount, status, reference)
-                VALUES (v_sender_account.id, v_receiver_account.id, p_amount, 'success', p_reference);
-
-                RETURN json_build_object(
-                    'status', 'success',
-                    'message', 'Transfer successful',
-                    'new_balance', v_sender_account.balance - p_amount,
-                    'new_t', p_timestamp
-                );
-            END;
-            $$ LANGUAGE plpgsql;
-        """)
-
-        
-        # Create accounts table
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS accounts (
-                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                profile_id UUID REFERENCES profiles(id),
-                balance FLOAT DEFAULT 0.0,
-                is_active BOOLEAN DEFAULT TRUE,
-                account_number TEXT UNIQUE NOT NULL,
-                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-            );
-        """)
-        
-        # Create transactions table
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS transactions (
-                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                sender_account_id UUID REFERENCES accounts(id),
-                receiver_account_id UUID REFERENCES accounts(id),
-                amount FLOAT NOT NULL,
-                status TEXT NOT NULL,
-                failure_reason TEXT,
-                reference TEXT NOT NULL,
-                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-            );
-        """)
-
-        # Create bills table
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS bills (
-                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                profile_id UUID REFERENCES profiles(id) ON DELETE CASCADE,
-                biller_name TEXT NOT NULL,
-                bill_number TEXT NOT NULL,
-                amount FLOAT NOT NULL,
-                due_date DATE NOT NULL,
-                status TEXT NOT NULL DEFAULT 'unpaid',
-                paid_at TIMESTAMP WITH TIME ZONE,
-                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-            );
-        """)
-
-        # Seed bills for existing profiles if they don't have any
-        cur.execute("SELECT id FROM profiles;")
-        profiles_list = cur.fetchall()
-        for prof in profiles_list:
-            prof_id = prof[0]
-            cur.execute("SELECT COUNT(*) FROM bills WHERE profile_id = %s;", (prof_id,))
-            bill_count = cur.fetchone()[0]
-            if bill_count == 0:
-                cur.execute("""
-                    INSERT INTO bills (profile_id, biller_name, bill_number, amount, due_date, status)
-                    VALUES 
-                    (%s, 'DESCO Electricity', 'BILL-E-5910', 850.50, CURRENT_DATE + INTERVAL '10 days', 'unpaid'),
-                    (%s, 'Link3 Internet', 'BILL-I-8802', 1200.00, CURRENT_DATE + INTERVAL '15 days', 'unpaid');
-                """, (prof_id, prof_id))
-        
-        conn.commit()
-        cur.close()
-        conn.close()
-        print("Database tables initialized successfully")
-    except Exception as e:
-        print(f"Error initializing database: {e}")
+    """Database tables initialization disabled for Render deployment"""
+    pass
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Initialize DB
-    init_db()
+    # Initialize DB - Disabled direct PostgreSQL init_db() on startup
+    # init_db()
     yield
 
 app = FastAPI(lifespan=lifespan)
@@ -1212,35 +1015,24 @@ async def get_operators():
 async def search_users(q: str, username_from_token: str = Depends(get_current_user)):
     """Search for users in database by query string q (username, full_name, mobile_number)"""
     try:
-        conn = psycopg2.connect(
-            host=DB_HOST,
-            database=DB_NAME,
-            user=DB_USER,
-            password=SUPABASE_DB_PASSWORD,
-            port=DB_PORT
-        )
-        cur = conn.cursor()
         query_pattern = f"%{q}%"
-        cur.execute("""
-            SELECT id, username, full_name, mobile_number 
-            FROM users 
-            WHERE (username ILIKE %s OR full_name ILIKE %s OR mobile_number ILIKE %s)
-              AND username != %s
-            LIMIT 15;
-        """, (query_pattern, query_pattern, query_pattern, username_from_token))
+        or_filter = f"username.ilike.{query_pattern},full_name.ilike.{query_pattern},mobile_number.ilike.{query_pattern}"
         
-        results = cur.fetchall()
-        cur.close()
-        conn.close()
+        response = supabase.table('users').select('id, username, full_name, mobile_number')\
+            .or_(or_filter)\
+            .neq('username', username_from_token)\
+            .limit(15)\
+            .execute()
         
         users_list = []
-        for r in results:
-            users_list.append({
-                "id": r[0],
-                "username": r[1],
-                "full_name": r[2] or '',
-                "mobile_number": r[3] or ''
-            })
+        if response.data:
+            for r in response.data:
+                users_list.append({
+                    "id": r.get('id'),
+                    "username": r.get('username'),
+                    "full_name": r.get('full_name') or '',
+                    "mobile_number": r.get('mobile_number') or ''
+                })
             
         return {"status": "success", "users": users_list}
     except Exception as e:
@@ -1262,38 +1054,27 @@ async def match_contacts(data: ContactsMatchRequest, username_from_token: str = 
             return {"status": "success", "matched_users": []}
 
         # 2. Query matching profiles
-        conn = psycopg2.connect(
-            host=DB_HOST,
-            database=DB_NAME,
-            user=DB_USER,
-            password=SUPABASE_DB_PASSWORD,
-            port=DB_PORT
-        )
-        cur = conn.cursor()
-        
-        cur.execute("""
-            SELECT id, username, full_name, mobile_number 
-            FROM users 
-            WHERE username != %s 
-              AND (
-                RIGHT(COALESCE(mobile_number, ''), 10) = ANY(%s)
-                OR RIGHT(COALESCE(username, ''), 10) = ANY(%s)
-              )
-            LIMIT 100;
-        """, (username_from_token, last_10_list, last_10_list))
-        
-        results = cur.fetchall()
-        cur.close()
-        conn.close()
+        or_conditions = []
+        for num in last_10_list:
+            or_conditions.append(f"mobile_number.ilike.%{num}")
+            or_conditions.append(f"username.ilike.%{num}")
+        or_filter_str = ",".join(or_conditions)
+
+        response = supabase.table('users').select('id, username, full_name, mobile_number')\
+            .or_(or_filter_str)\
+            .neq('username', username_from_token)\
+            .limit(100)\
+            .execute()
         
         matched = []
-        for r in results:
-            matched.append({
-                "id": r[0],
-                "username": r[1],
-                "full_name": r[2] or '',
-                "mobile_number": r[3] or ''
-            })
+        if response.data:
+            for r in response.data:
+                matched.append({
+                    "id": r.get('id'),
+                    "username": r.get('username'),
+                    "full_name": r.get('full_name') or '',
+                    "mobile_number": r.get('mobile_number') or ''
+                })
             
         return {"status": "success", "matched_users": matched}
     except Exception as e:
@@ -1311,36 +1092,25 @@ async def get_bills(username: str, username_from_token: str = Depends(get_curren
         if not user_profile:
             return JSONResponse(status_code=404, content={"status": "error", "message": "User not found"})
             
-        conn = psycopg2.connect(
-            host=DB_HOST,
-            database=DB_NAME,
-            user=DB_USER,
-            password=SUPABASE_DB_PASSWORD,
-            port=DB_PORT
-        )
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT id, biller_name, bill_number, amount, due_date::text, status, paid_at::text
-            FROM bills
-            WHERE profile_id = %s
-            ORDER BY created_at DESC;
-        """, (user_profile['id'],))
-        
-        bills_data = cur.fetchall()
-        cur.close()
-        conn.close()
+        response = supabase.table('bills').select('id, biller_name, bill_number, amount, due_date, status, paid_at')\
+            .eq('profile_id', user_profile['id'])\
+            .order('created_at', desc=True)\
+            .execute()
         
         bills_list = []
-        for b in bills_data:
-            bills_list.append({
-                "id": b[0],
-                "biller_name": b[1],
-                "bill_number": b[2],
-                "amount": float(b[3]),
-                "due_date": b[4],
-                "status": b[5],
-                "paid_at": b[6]
-            })
+        if response.data:
+            for b in response.data:
+                due_date_val = b.get('due_date')
+                paid_at_val = b.get('paid_at')
+                bills_list.append({
+                    "id": b.get('id'),
+                    "biller_name": b.get('biller_name'),
+                    "bill_number": b.get('bill_number'),
+                    "amount": float(b.get('amount')) if b.get('amount') is not None else 0.0,
+                    "due_date": str(due_date_val) if due_date_val is not None else '',
+                    "status": b.get('status'),
+                    "paid_at": str(paid_at_val) if paid_at_val is not None else None
+                })
             
         return {"status": "success", "bills": bills_list}
     except Exception as e:
