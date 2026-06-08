@@ -16,30 +16,30 @@ BEGIN
     -- 1. Fetch profiles (from users table) with locking
     SELECT * INTO v_sender_profile FROM users WHERE username = p_sender_username FOR UPDATE;
     IF NOT FOUND THEN
-        RETURN json_build_object('status', 'error', 'message', 'Sender profile not found');
+        RETURN json_build_object('status', 'error', 'msg', 'Sender profile not found');
     END IF;
 
     SELECT * INTO v_receiver_profile FROM users WHERE username = p_receiver_username FOR UPDATE;
     IF NOT FOUND THEN
-        RETURN json_build_object('status', 'error', 'message', 'Receiver profile not found');
+        RETURN json_build_object('status', 'error', 'msg', 'Receiver profile not found');
     END IF;
 
     -- 2. Fetch accounts with locking
     SELECT * INTO v_sender_account FROM accounts WHERE profile_id = v_sender_profile.id AND is_active = TRUE FOR UPDATE;
     IF NOT FOUND THEN
-        RETURN json_build_object('status', 'error', 'message', 'Sender account not found');
+        RETURN json_build_object('status', 'error', 'msg', 'Sender account not found');
     END IF;
 
     SELECT * INTO v_receiver_account FROM accounts WHERE profile_id = v_receiver_profile.id AND is_active = TRUE FOR UPDATE;
     IF NOT FOUND THEN
-        RETURN json_build_object('status', 'error', 'message', 'Receiver account not found');
+        RETURN json_build_object('status', 'error', 'msg', 'Receiver account not found');
     END IF;
 
     -- 3. Balance verification
     IF v_sender_account.balance < p_amount THEN
         INSERT INTO transactions (sender_account_id, receiver_account_id, amount, status, failure_reason, reference)
         VALUES (v_sender_account.id, v_receiver_account.id, p_amount, 'aborted', 'Insufficient balance', p_reference);
-        RETURN json_build_object('status', 'futile', 'message', 'Insufficient balance');
+        RETURN json_build_object('status', 'futile', 'msg', 'Insufficient balance');
     END IF;
 
     -- 4. Daily Limit validation (Bypassed since daily limit columns are not in approved schema)
@@ -48,7 +48,7 @@ BEGIN
     IF p_timestamp <= v_sender_profile.last_t THEN
         INSERT INTO transactions (sender_account_id, receiver_account_id, amount, status, failure_reason, reference)
         VALUES (v_sender_account.id, v_receiver_account.id, p_amount, 'aborted', 'Replay attack detected (T <= Last_T)', p_reference);
-        RETURN json_build_object('status', 'error', 'message', 'Replay attack detected');
+        RETURN json_build_object('status', 'error', 'msg', 'Replay attack detected');
     END IF;
 
     -- 6. Apply balances
@@ -66,7 +66,7 @@ BEGIN
 
     RETURN json_build_object(
         'status', 'success',
-        'message', 'Transfer successful',
+        'msg', 'Transfer successful',
         'new_balance', v_sender_account.balance - p_amount,
         'new_t', p_timestamp
     );

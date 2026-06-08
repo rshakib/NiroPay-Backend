@@ -966,9 +966,9 @@ async def auth_transfer(envelope: SecureEnvelope):
                 }
                 return crypto.encrypt_outer_envelope(response_data, SECRET_KEY)
             elif result['status'] == 'futile':
-                return JSONResponse(status_code=400, content={"status": "futile", "message": result['message']})
+                return JSONResponse(status_code=400, content={"status": "futile", "message": result['msg']})
             else:
-                return JSONResponse(status_code=403, content={"status": "error", "message": result['message']})
+                return JSONResponse(status_code=403, content={"status": "error", "message": result['msg']})
 
         except Exception as rpc_err:
             print(f"RPC Error: {rpc_err}")
